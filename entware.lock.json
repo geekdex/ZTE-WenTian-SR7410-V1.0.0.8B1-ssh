@@ -1,0 +1,41 @@
+{
+  "base_url": "http://bin.entware.net/aarch64-k3.10/",
+  "packages": [
+    {
+      "name": "dropbear",
+      "version": "2025.89-1",
+      "filename": "dropbear_2025.89-1_aarch64-3.10.ipk",
+      "sha256": "00b2005611370cc20b432292dc06e0bce6b4d666b62e78ca96242d5bfa0bd6a4"
+    },
+    {
+      "name": "libc",
+      "version": "2.27-12",
+      "filename": "libc_2.27-12_aarch64-3.10.ipk",
+      "sha256": "2e0890ada42c28676135198b325b215e169c2549e646a20d3cbb55bcf9be5a61"
+    },
+    {
+      "name": "libgcc",
+      "version": "8.4.0-12",
+      "filename": "libgcc_8.4.0-12_aarch64-3.10.ipk",
+      "sha256": "8cfa38d0a541419413dbf4b24983eeb572e3c61d3a4424939ee27fab89ebe990"
+    },
+    {
+      "name": "libssp",
+      "version": "8.4.0-12",
+      "filename": "libssp_8.4.0-12_aarch64-3.10.ipk",
+      "sha256": "896d0d1de8a5813c7b624b02f3de69e05c811c02fa3e702d4be4b44f3b7d04f4"
+    },
+    {
+      "name": "librt",
+      "version": "2.27-12",
+      "filename": "librt_2.27-12_aarch64-3.10.ipk",
+      "sha256": "d4af813162469ce5d1a0027dd56ff6ef103963125e0c97d40e762d2d4b4f8424"
+    },
+    {
+      "name": "libpthread",
+      "version": "2.27-12",
+      "filename": "libpthread_2.27-12_aarch64-3.10.ipk",
+      "sha256": "89784fb69ff1c1611fa8ad390981a7f927fe9ddfaf211bf594bf51ff6a9126ca"
+    }
+  ]
+}

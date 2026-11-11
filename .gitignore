@@ -1,0 +1,8 @@
+# Private runtime data
+private/
+.cache/
+build/
+*.download
+*.pyc
+__pycache__/
+.venv/
