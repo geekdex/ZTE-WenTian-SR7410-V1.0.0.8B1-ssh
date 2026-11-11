@@ -1,7 +1,7 @@
-# ZTE WenTian BE7200 Pro+ (ZXSLC SR7410) SSH 开启与持久化指南
+# ZTE Wentian BE7200 Pro+ (ZXSLC SR7410) SSH 持久化工具包
 
-> 适用固件版本：`V1.0.0.8B1.8000`（主控 SoC: 中兴微电子 Sanechips `ZX279133` AArch64）  
-> 特性：全离线运行包、零云端依赖、防变砖安全校验、开机静默自启、非 root 用户名修复、自适应自定义内网网段。
+> **适用固件**：`V1.0.0.8B1.8000`（SoC: Sanechips `ZX279133` AArch64）  
+> **核心特性**：全离线运行时（免联网）、零日志无磨损、全流程幂等、防跳步阻断、开机静默自启。
 
 ---
 
@@ -16,230 +16,145 @@
 
 ---
 
-## 1. 核心原理与设计关键点
+## 1. 关键原理与设计要点
 
-### 1.1 Telnet 激活与账号密码来源
-
-- **配置加密结构**：中兴路由器的备份文件 `config.bin` 使用标准的 Type 4 格式加密（AES-256-CBC + zlib 分块压缩）。
-  - 密钥（出厂固定）：Key = `SR7410Key80748010`，IV = `SR7410Iv80748010`。
-- **Telnet 密码提取**：解密出的 XML 表中包含 `<Tbl name="TelnetCfg">`。原厂系统出厂内置的 Telnet 账号密码为：
-  - **用户名 (TS_UName)**：`root`
-  - **密　码 (TS_UPwd)**：`abc123!@#`
-  - **端口号 (TS_Port)**：`23`
-- **开启逻辑与自适应内网 IP**：
-  - 脚本将 `TS_Enable` 与 `Lan_Enable` 置为 `1`，保持 `Wan_Enable="0"`（仅限局域网访问，避免公网风险）。
-  - **关于路由器 IP**：中兴固件在 `Lan_Enable="1"` 时，会自动将 Telnet 服务绑定到路由器的内网网桥网卡（`br0`）。无论是原厂默认的 `192.168.0.1`，还是用户在后台自定义修改过的 `192.168.1.1`、`192.168.50.1` 或 `10.0.0.1` 等，Telnet 都会自动监听在**当前路由器的内网网关 IP** 上。
-  - `manage.py unlock-telnet` 解密配置时会自动从 XML 中识别出你的路由器内网 IP，并提示后续对应的操作地址。
-
-### 1.2 独立 Dropbear 运行时重定位
-
-- 路由器原生 libc 严重裁剪，缺少 PTY 支持。
-- 工具预先提取并锁定了 Entware AArch64 编译的 **Dropbear 2025.89** 及 **Glibc 2.27** 系列库文件，保存在 `packages/` 目录下。
-- 通过二进制静态字串替换完成独立重定位（不改变文件长度）：
-  - `/opt/lib` $\rightarrow$ `/var/zsl`（软链接至 `/Plugin/sr7410-ssh/lib`）
-  - `/opt/etc` $\rightarrow$ `/var/zse`（软链接至 `/etc`）
-  - `/dev/ptmx` $\rightarrow$ `/var/ptmx`，`/dev/pts` $\rightarrow$ `/var/pts`（自动 mount 新的 devpts 实例，彻底解决 PTY 交互终端分配失败报错）
-- 整个 SSH 运行时完全隔离在可写闪存 `/Plugin/sr7410-ssh`（挂载于 `/dev/mtdblock12` JFFS2 分区），不修改固件只读分区。
-
-### 1.3 开机自启动机制 (V1.0.0.8B1.8000 专有排坑)
-
-- 固件在开机时通过 `/bin/dlspeedplugind` 守护进程拉起后台监控：
-  `/bin/sh /dlspeedPlugin/dlspeed_rt/dlspeed_monitor.sh &`（PID 1020 左右）。
-- 固件启动链 `/etc/dlspeed_tar.sh` 优先检查覆盖包 `/apps/apps/dlspeed_rt.tar.gz`（即 `/Plugin/apps/dlspeed_rt.tar.gz`）。
-- 该版本原版 `dlspeed_rt.tar.gz` 的校验哈希为：
-  `4b70059ff49906ac02b47ce1901b7efced216ef80ab383d93a26f78a55a2ee8d`
-- **关键排坑**：`V1.0.0.8B1.8000` 版本的 `/etc/dlspeed_tar.sh` 增加了 `if [ $appFileDir ]; then echo "exists"; else tar ...; fi` 逻辑。如果闪存中的 `/Plugin/dlspeed_rt` 目录早已存在，开机不会重新解压覆盖包！
-  - **解决手段**：`enable-autostart` 不仅在 `/Plugin/apps/` 下放置打好补丁的压缩包，还**直接将打了自启 Hook 的 `dlspeed_monitor.sh` 解包写入闪存 `/Plugin/dlspeed_rt/`**。
-  - 路由器每次开机，PID 1020 会立即执行注入的 Hook，检测 `/Plugin/sr7410-ssh/autostart.enabled` 存在后在后台唤醒 Dropbear。
-
-### 1.4 UID 0 超级用户名的真相：`Z500_w9bZ`
-
-- 系统 `/etc/passwd` 中 UID 为 0 的超级管理员用户名为 **`Z500_w9bZ`**（共 9 位，末尾含大写字母 Z）。
-- **截断陷阱**：BusyBox 的 `ls -l` 在格式化输出属主时，**默认只截取前 8 位字符**，显示为 `Z500_w9b`。如果客户端配置写成 `User Z500_w9b`，Dropbear 会在日志中报 `Login attempt for nonexistent user` 并拒绝公钥认证。
-- SSH 客户端必须使用真正的全名：**`User Z500_w9bZ`**。
-
-### 1.5 全流程幂等性保障 (Idempotent Design)
-
-- **重复执行完全安全**：即使路由器当前已经正常运行 SSH，或者你已经配置完成，再次执行整个部署流程或单个指令进行可行性验证，系统均会自动识别现有状态并平滑同步，不会报错退出，也不会损坏现有服务：
-  - `unlock-telnet`：允许重复生成并覆写待导入文件，不会报目录或文件已存在错误。
-  - `install-ssh`：自动检测已存在的 `/Plugin/sr7410-ssh` 及运行中的 Dropbear 进程，自动补齐缺失权限、校验并同步客户端公钥至 `authorized_keys`（绝不重复添加多余公钥行），并更新本地客户端配置。
-  - `enable-autostart`：若已配置自启，会自动校验闪存中的 Hook 脚本完整性并快速确认就绪，避免重复覆盖原厂备份。
-
-### 1.6 零日志与零常驻开销设计 (Zero-Log & Zero-Overhead)
-
-- **0 字节磁盘/内存占用**：为了支持路由器长达 1 年甚至数年不重启的稳定运行，所有守护进程输出均通过 `>/dev/null 2>&1` 丢弃，**不在闪存或 RAM 中产生任何追加日志文件**。
-- **不污染系统 Syslog**：Dropbear 使用 `-E` 将日志直接导向 stderr 并丢弃至 `/dev/null`，避免了向系统日志（如 `dmesg` 或 `syslog`）写入冗余的连接与心跳信息。
-- **0 后台监控开销**：不启动任何轮询休眠进程（无 `while true; sleep` 脚本常驻），自启脚本单次执行启动后立即退出。无 SSH 连接时 CPU 占用严格为 0%。
-- **临时故障排查**：若平时遇到连接异常，无需查日志，直接使用 Telnet 进入路由器运行前台测试命令即可实时打印诊断信息：
-  ```sh
-  /Plugin/sr7410-ssh/sbin/dropbear -F -E -s -D /Plugin/sr7410-ssh -p 22
-  ```
+- **Telnet 解锁**：`config.bin` 使用标准 Type 4 格式（AES-256-CBC）加密，出厂内置账号 `root`，密码 `abc123!@#`。将 `TS_Enable` 与 `Lan_Enable` 置 1 即可开启内网 Telnet（自动自适应当前网关 IP）。
+- **独立运行时**：原厂 libc 裁剪严重且缺少 PTY 支持。工具内置预编译重定位的 **Dropbear 2025.89 + Glibc 2.27** 独立运行时至 `/Plugin/sr7410-ssh`（JFFS2 持久闪存分区），挂载独立 devpts，不碰只读根分区。
+- **开机自启**：利用 `/Plugin/dlspeed_rt/dlspeed_monitor.sh` 守护注入 Hook，开机由系统守护进程拉起 Dropbear。
+- **UID 0 超级用户**：系统实际最高权限账号名为 **`Z500_w9bZ`**（末尾含大写 Z，共 9 位；BusyBox `ls -l` 默认只截取显示前 8 位导致常被误写为 `Z500_w9b`）。
+- **零日志设计**：Dropbear 使用 `-E` 将日志定向至 stderr 并由外部直接丢弃到 `/dev/null`，不生成磁盘/RAM 日志文件，无任何后台轮询休眠脚本，**长期运行 0 内存增长、0% CPU 空转**。
+- **防呆与幂等**：支持任意重复执行，配置与公钥自动增量同步；未解锁 Telnet 或未安装前置依赖时自动阻断并提示。
 
 ---
 
-## 2. 文件分布与目标映射表
+## 2. 离线文件与写入路径
 
-### 2.1 本地离线包目录 (`packages/`)
+### 2.1 预置离线包 (`packages/`)
 
-本地已经完整固化所有依赖，无需访问外网：
+- `dropbear_2025.89-1_aarch64-3.10.ipk` / `libc_2.27-12_aarch64-3.10.ipk` 等共 6 个官方归档包
+- `ssh-runtime.tar.gz`：已预先重定位完成的纯净二进制独立运行时（~943 KB，免编译免联网）
 
-| 文件名                                | 校验 / 说明                                         |
-| :------------------------------------ | :-------------------------------------------------- |
-| `dropbear_2025.89-1_aarch64-3.10.ipk` | 官方 Entware 归档包 (115 KB)                        |
-| `libc_2.27-12_aarch64-3.10.ipk`       | 包含 ld 与 libc (1.4 MB)                            |
-| `libgcc_8.4.0-12_aarch64-3.10.ipk`    | GCC 运行库 (36 KB)                                  |
-| `libpthread_2.27-12_aarch64-3.10.ipk` | 线程库 (44 KB)                                      |
-| `librt_2.27-12_aarch64-3.10.ipk`      | 实时库 (14 KB)                                      |
-| `libssp_8.4.0-12_aarch64-3.10.ipk`    | 栈保护库 (4.2 KB)                                   |
-| **`ssh-runtime.tar.gz`**              | **已完成重定位并打包好的纯净二进制运行时 (964 KB)** |
+### 2.2 路由器写入清单
 
-### 2.2 路由器写入路径与权限清单
-
-| 目标路径 (路由器内)                            | 权限 (Mode) | 属主             | 作用与功能说明                                              |
-| :--------------------------------------------- | :---------- | :--------------- | :---------------------------------------------------------- |
-| `/Plugin/sr7410-ssh/`                          | `0700`      | `Z500_w9bZ:root` | SSH 主运行目录（存放于 JFFS2 持久闪存）                     |
-| `/Plugin/sr7410-ssh/sbin/dropbear`             | `0755`      | `Z500_w9bZ:root` | 重定位后的 Dropbear 服务器主程序                            |
-| `/Plugin/sr7410-ssh/lib/`                      | `0755`      | `Z500_w9bZ:root` | 运行时依赖的 Glibc 动态链接库                               |
-| `/Plugin/sr7410-ssh/authorized_keys`           | `0600`      | `Z500_w9bZ:root` | 允许登录的客户端 SSH 公钥列表                               |
-| `/Plugin/sr7410-ssh/settings.conf`             | `0600`      | `Z500_w9bZ:root` | 监听配置（`SSH_LAN_IP` 自动侦测绑定网桥 IP，`SSH_PORT=22`） |
-| `/Plugin/sr7410-ssh/dropbear_ed25519_host_key` | `0600`      | `Z500_w9bZ:root` | 路由器本地生成的主机私钥                                    |
-| `/Plugin/sr7410-ssh/autostart.enabled`         | `0600`      | `Z500_w9bZ:root` | 开机自启生效开关标志                                        |
-| `/Plugin/apps/dlspeed_rt.tar.gz`               | `0600`      | `Z500_w9bZ:root` | 打入开机自启 Hook 的测速组件覆盖包                          |
-| `/Plugin/dlspeed_rt/dlspeed_monitor.sh`        | `0755`      | `Z500_w9bZ:root` | 闪存中当前运行的开机自启脚本                                |
-| `/var/sr7410-ssh/dropbear.pid`                 | `0600`      | `Z500_w9bZ:root` | Dropbear 运行进程 PID 标识（仅在内存 RAM 中）               |
+| 目标路径 (路由器内)                     |  权限  | 说明                                                   |
+| :-------------------------------------- | :----: | :----------------------------------------------------- |
+| `/Plugin/sr7410-ssh/`                   | `0700` | SSH 持久化根目录（存放 Dropbear 主程序、依赖库及密钥） |
+| `/Plugin/sr7410-ssh/authorized_keys`    | `0600` | 客户端 SSH 免密公钥白名单                              |
+| `/Plugin/sr7410-ssh/autostart.enabled`  | `0600` | 开机自启生效开关标志                                   |
+| `/Plugin/dlspeed_rt/dlspeed_monitor.sh` | `0755` | 注入自启 Hook 的监控脚本                               |
+| `/var/sr7410-ssh/dropbear.pid`          | `0600` | Dropbear 运行 PID（仅存内存 RAM）                      |
 
 ---
 
-## 3. 完整操作流程（路由器重置后一键恢复）
+## 3. 快速上手流程
 
-假设路由器恢复出厂设置或重新升级固件，只需以下 5 步即可完全恢复：
-
-### 步骤 0：准备工作与环境依赖
-
-本工具推荐使用 Python 3.9+，安装依赖：
+### 步骤 0：环境准备（推荐 `uv`）
 
 ```bash
+# 方式 A：使用 uv（推荐，免手动激活虚拟环境）
+uv sync
+
+# 方式 B：传统 pip
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-_(主要包含 `zcu`, `pycryptodomex`, `telnetlib3`)_
-
 ---
 
-### 步骤 1：导出原版配置并一键解锁 Telnet
+### 步骤 1：导出配置并解锁 Telnet
 
-1. 浏览器打开路由器管理后台（例如 `http://192.168.0.1`，若你修改过后台 IP 则打开对应地址如 `http://192.168.1.1`）。
-2. 依次点击：**【管理】 $\rightarrow$ 【配置管理】 $\rightarrow$ 【备份配置】**，下载保存为 `config.bin`。
-3. 在本工具目录下执行：
+1. 登录路由器后台（如 `http://192.168.0.1`），进入【管理】$\rightarrow$【配置管理】$\rightarrow$【备份配置】，下载保存为 `config.bin`。
+2. 运行解密与配置生成命令：
    ```bash
-   python3 manage.py unlock-telnet config.bin
+   uv run manage.py unlock-telnet config.bin
+   # 若使用传统 pip 环境：python3 manage.py unlock-telnet config.bin
    ```
-   **输出结果示例**：
-   ```text
-   ✅ Telnet 配置解锁成功！
-   路由器内网 IP   : 192.168.0.1 (从配置中自动识别)
-   Telnet 端口号   : 23
-   Telnet 用户名   : root
-   Telnet 密码     : abc123!@#
-   待导入加密配置  : private/telnet/config-telnet-lan-only.bin
-   ```
-   _(注：如果你的内网网段是 192.168.1.x 或其它子网，脚本会自动显示你的实际内网 IP)_
+   _脚本会自动识别当前内网 IP、Telnet 账号密码，并在 `private/telnet/` 下生成待恢复配置。_
 
 ---
 
-### 步骤 2：恢复配置激活 Telnet
+### 步骤 2：在后台恢复配置开启 Telnet
 
-1. 回到路由器管理后台：**【管理】 $\rightarrow$ 【配置管理】 $\rightarrow$ 【恢复配置】**。
-2. 上传刚刚生成的 `private/telnet/config-telnet-lan-only.bin`。
+1. 回到路由器后台：【管理】$\rightarrow$【配置管理】$\rightarrow$【恢复配置】。
+2. 选择上传刚生成的 `private/telnet/config-telnet-lan-only.bin`。
 3. 点击“恢复配置”，等待路由器自动重启（约 1 分钟）。
-4. 重启完成后，Telnet（23端口）已在你的内网网段永久激活！
 
 ---
 
 ### 步骤 3：一键部署 Dropbear SSH
 
-确认你的本地电脑已有 SSH 密钥（如果没有，执行 `ssh-keygen -t ed25519 -f ~/.ssh/sr7410_ed25519` 生成）。
-
-执行一键安装（使用本地已打好的运行时，完全无需联网）：
+本地生成密钥（若已有 `~/.ssh/sr7410_ed25519` 或 `~/.ssh/id_ed25519` 可跳过）：
 
 ```bash
-python3 manage.py install-ssh \
-  --host <路由器_LAN_IP> \
-  --config private/telnet/config-original.xml \
-  --public-key ~/.ssh/sr7410_ed25519.pub
+ssh-keygen -t ed25519 -f ~/.ssh/sr7410_ed25519
 ```
 
-> _(注：`<路由器_LAN_IP>` 替换为你路由器的实际内网 IP，默认通常为 `192.168.0.1`；脚本会自动识别 UID 0 用户名 `Z500_w9bZ`，安全传输运行时并立即拉起 Dropbear 服务)_
+执行安装（自动加载步骤 1 提取的密码并自动识别本地公钥）：
+
+```bash
+uv run manage.py install-ssh --host 192.168.0.1
+# 若路由器修改过后台 IP，替换为实际 IP 即可（如 --host 192.168.1.1）
+```
 
 ---
 
 ### 步骤 4：启用开机自启
 
 ```bash
-python3 manage.py enable-autostart \
-  --host <路由器_LAN_IP> \
-  --config private/telnet/config-original.xml
+uv run manage.py enable-autostart --host 192.168.0.1
 ```
 
-_提示 `Autostart enabled; reboot separately when ready`，说明自启钩子已成功固化到持久闪存。_
+_提示 `Autostart enabled` 即代表自启 Hook 已成功固化到闪存。_
 
 ---
 
-### 步骤 5：配置客户端 SSH 登录
+### 步骤 5：免密登录
 
-在电脑或需要登录路由器的其他内网设备（如 Armbian）上，配置 `~/.ssh/config`：
+将以下配置添加至你的 `~/.ssh/config`（电脑或同局域网 Armbian 等）：
 
 ```ssh-config
 Host sr7410
-  HostName <路由器_LAN_IP>
+  HostName 192.168.0.1
   Port 22
   User Z500_w9bZ
   IdentityFile ~/.ssh/sr7410_ed25519
   IdentitiesOnly yes
   PasswordAuthentication no
-  ConnectTimeout 8
 ```
 
-_(将 `<路由器_LAN_IP>` 改为你的路由器 IP，如 `192.168.0.1` 或 `192.168.1.1`)_
-
-确保私钥权限为 `600`：
+执行登录：
 
 ```bash
 chmod 600 ~/.ssh/sr7410_ed25519
-```
-
-直接测试登录：
-
-```bash
 ssh sr7410
 ```
 
-秒进路由器超级管理员终端！重启路由器后直接敲 `ssh sr7410` 也依然秒连！
+秒进路由器超级管理员终端！
 
 ---
 
-## 4. 常用维护与排查指令
+## 4. 常用维护指令
 
-- **运行自检**：
+所有命令均使用 `uv run manage.py` 执行（传统环境替换为 `python3 manage.py`）：
+
+- **连通性校验**：
   ```bash
-  python3 manage.py verify-ssh
+  uv run manage.py verify-ssh
   ```
-- **查看路由器当前 SSH 状态**：
+- **查看状态**：
   ```bash
-  python3 manage.py status --host <路由器_LAN_IP> --config private/telnet/config-original.xml
+  uv run manage.py status --host 192.168.0.1
   ```
-- **手动 Telnet 备用登录**：
+- **备用 Telnet 手动连接**：
   ```bash
-  telnet <路由器_LAN_IP>
-  # 用户名: root
-  # 密  码: abc123!@#
+  telnet 192.168.0.1
+  # 账号: root / 密码: abc123!@#
   ```
-- **前台测试与实时排错（如若需要）**：
+- **前台交互式调试（若遇到异常）**：
   ```sh
-  # 平时零日志运行；若遇异常可在 Telnet 中前台运行排查：
   /Plugin/sr7410-ssh/sbin/dropbear -F -E -s -D /Plugin/sr7410-ssh -p 22
   ```
-- **如需彻底卸载 SSH**：
+- **彻底卸载 SSH**：
   ```bash
-  python3 manage.py uninstall-ssh --host <路由器_LAN_IP> --config private/telnet/config-original.xml
+  uv run manage.py uninstall-ssh --host 192.168.0.1
   ```

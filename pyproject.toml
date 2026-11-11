@@ -1,0 +1,13 @@
+[project]
+name = "sr7410-ssh"
+version = "1.0.0"
+description = "Offline idempotent zero-log SSH toolkit for ZTE Wentian BE7200 Pro+ (SR7410)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "zcu @ git+https://github.com/mkst/zte-config-utility.git@e3a1a7f56c2df26a02f52f72b16173d0702d9ad0",
+    "pycryptodomex>=3.20.0",
+    "telnetlib3>=4.0.3",
+    "wcwidth>=0.9.4",
+    "certifi>=2026.10.23",
+]
